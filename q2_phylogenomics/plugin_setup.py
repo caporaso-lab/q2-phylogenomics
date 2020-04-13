@@ -31,6 +31,7 @@ import q2_phylogenomics
 import q2_phylogenomics._prinseq
 import q2_phylogenomics._filter
 import q2_phylogenomics._assemble
+import q2_phylogenomics._pipelines
 from q2_types.bowtie2 import Bowtie2Index
 from q2_types.feature_data import DNASequencesDirectoryFormat
 from q2_phylogenomics._format import (GenBankFormat, GenBankDirFmt,
@@ -114,34 +115,32 @@ prinseq_parameter_descriptions = {
              'duplicate).'
 }
 
-plugin.methods.register_function(
-    function=q2_phylogenomics._prinseq.prinseq_single,
-    inputs={'demultiplexed_sequences': SampleData[SequencesWithQuality]},
-    parameters=prinseq_parameters,
-    outputs=[('trimmed_sequences', SampleData[SequencesWithQuality])],
-    input_descriptions=prinseq_input,
-    parameter_descriptions=prinseq_parameter_descriptions,
-    output_descriptions=prinseq_output,
-    name='Filter and trim demultiplexed single-end sequences with PRINSEQ.',
-    description='Filter and trim demultiplexed single-end FASTQ sequences '
-                'based on quality scores using PRINSEQ-lite.',
-    citations=[citations['schmieder_prinseq']]
-)
+map_paired_reads_input_descriptions = {
+    'demux': 'The demultiplexed sequences to map to the reference.',
+    'database': 'The reference sequence(s).'
+}
 
-plugin.methods.register_function(
-    function=q2_phylogenomics._prinseq.prinseq_paired,
-    inputs={
-        'demultiplexed_sequences': SampleData[PairedEndSequencesWithQuality]},
-    parameters=prinseq_parameters,
-    outputs=[('trimmed_sequences', SampleData[PairedEndSequencesWithQuality])],
-    input_descriptions=prinseq_input,
-    parameter_descriptions=prinseq_parameter_descriptions,
-    output_descriptions=prinseq_output,
-    name='Filter and trim demultiplexed paired-end sequences with PRINSEQ.',
-    description='Filter and trim demultiplexed paired-end FASTQ sequences '
-                'based on quality scores using PRINSEQ-lite.',
-    citations=[citations['schmieder_prinseq']]
-)
+map_paired_reads_parameters = {
+    'mismatches_per_seed': Int % Range(0, 1, inclusive_end=True),
+    'ceil_coefficient': Float,
+    'n_threads': Int % Range(1, None),
+    'mapped_only': Bool}
+
+map_paired_reads_parameter_descriptions = {
+    'mismatches_per_seed': 'Max mismatches allowed in seed alignment.',
+    'ceil_coefficient': 'Coefficient used to specify the bowtie '
+                        'function L(0,x) for max number of non-A/C/G/T '
+                        'characters allowed in an alignment.',
+    'n_threads': 'Number of alignment threads to launch.',
+    'mapped_only': 'Retain only records for reads that were mapped '
+                   'to the database in the output files.'
+}
+
+map_paired_reads_output_descriptions = {
+    'alignment_maps': 'Results of mapping reads in each input sample '
+                      'to the provided database.'
+}
+
 
 filter_input = {'demultiplexed_sequences': 'The sequences to be trimmed.',
                 'database': 'Bowtie2 indexed database.'}
@@ -179,6 +178,198 @@ filter_description = (
     'shotgun genome or amplicon sequence data), or alternatively (when '
     'exclude_seqs is False) to only keep sequences that do align to the '
     'reference.')
+
+consensus_sequence_output_descriptions = {
+    'table': 'Table describing which consensus sequences are '
+             'observed in each sample.',
+    'consensus_sequences': 'Mapping of consensus sequence identifiers '
+                           'to consensus sequences.'
+}
+
+consensus_sequence_outputs = [
+    ('table', FeatureTable[PresenceAbsence]),
+    ('consensus_sequences', FeatureData[Sequence])]
+
+make_pileup_parameters = {
+    'min_mapq': Int % Range(0, None),
+    'max_depth': Int % Range(1, None)
+}
+
+make_pileup_parameter_descriptions = {
+    'min_mapq': 'The minimum mapQ to consider an alignment.',
+    'max_depth': 'The max per-file depth.'
+}
+
+plugin.pipelines.register_function(
+    function=q2_phylogenomics._pipelines.filter_clean_consensus,
+    inputs={
+        'demultiplexed_sequences': SampleData[PairedEndSequencesWithQuality],
+        'alignment_ref': Bowtie2Index,
+        'filter_ref': Bowtie2Index},
+    parameters={
+        'enable_cutadapt': Bool,
+        'enable_prinseq': Bool,
+        'cutadapt_cores': Int % Range(1, None),
+        'cutadapt_adapter_f': List[Str],
+        'cutadapt_front_f': List[Str],
+        'cutadapt_anywhere_f': List[Str],
+        'cutadapt_adapter_r': List[Str],
+        'cutadapt_front_r': List[Str],
+        'cutadapt_anywhere_r': List[Str],
+        'cutadapt_error_rate': Float % Range(0, 1, inclusive_start=True,
+                                             inclusive_end=True),
+        'cutadapt_indels': Bool,
+        'cutadapt_times': Int % Range(1, None),
+        'cutadapt_overlap': Int % Range(1, None),
+        'cutadapt_match_read_wildcards': Bool,
+        'cutadapt_match_adapter_wildcards': Bool,
+        'cutadapt_minimum_length': Int % Range(1, None),
+        'cutadapt_discard_untrimmed': Bool,
+        **{'bowtie2_' + k: v for k, v in filter_parameters.items()},
+        **{'bowtie2_' + k: v for k, v in map_paired_reads_parameters.items()
+           if k != 'n_threads'},
+        **{'prinseq_' + k: v for k, v in prinseq_parameters.items()},
+        **{'samtools_' + k: v for k, v in make_pileup_parameters.items()}},
+    outputs=consensus_sequence_outputs + [
+            ('filtered_sequences', SampleData[PairedEndSequencesWithQuality]),
+            ('clean_sequences', SampleData[PairedEndSequencesWithQuality])],
+    input_descriptions={
+        'demultiplexed_sequences': 'Demultiplexed sequences.',
+        'alignment_ref': 'Reference genome(s) to use for alignment.',
+        'filter_ref': 'Reference sequences to use for filtering demultiplexed '
+                      'sequences with bowtie2. Will remove sequences that hit '
+                      'reference if exclude_seqs is True, otherwise remove '
+                      'sequences that do not hit the reference. If none is '
+                      'provided, this filter is not performed. This step is '
+                      'typically performed to remove host contaminant reads.'},
+    parameter_descriptions={
+        'enable_cutadapt': 'Enable/disable adapter trimming with cutadapt.',
+        'enable_prinseq': 'Enable/disable quality trimming with prinseq.',
+        'cutadapt_cores': 'Number of CPU cores to use.',
+        'cutadapt_adapter_f': (
+            'Sequence of an adapter ligated to the 3\' end. The '
+            'adapter and any subsequent bases are trimmed. If a `$` '
+            'is appended, the adapter is only found if it is at the '
+            'end of the read. Search in forward read. If your '
+            'sequence of interest is "framed" by a 5\' and a 3\' '
+            'adapter, use this parameter to define a "linked" primer '
+            '- see https://cutadapt.readthedocs.io for complete '
+            'details.'),
+        'cutadapt_front_f': (
+            'Sequence of an adapter ligated to the 5\' end. The '
+            'adapter and any preceding bases are trimmed. Partial '
+            'matches at the 5\' end are allowed. If a `^` character '
+            'is prepended, the adapter is only found if it is at the '
+            'beginning of the read. Search in forward read.'),
+        'cutadapt_anywhere_f': (
+            'Sequence of an adapter that may be ligated to the 5\' '
+            'or 3\' end. Both types of matches as described under '
+            '`adapter` and `front` are allowed. If the first base '
+            'of the read is part of the match, the behavior is as '
+            'with `front`, otherwise as with `adapter`. This option '
+            'is mostly for rescuing failed library preparations - '
+            'do not use if you know which end your adapter was '
+            'ligated to. Search in forward read.'),
+        'cutadapt_adapter_r': (
+            'Sequence of an adapter ligated to the 3\' end. The '
+            'adapter and any subsequent bases are trimmed. If a `$` '
+            'is appended, the adapter is only found if it is at the '
+            'end of the read. Search in reverse read. If your '
+            'sequence of interest is "framed" by a 5\' and a 3\' '
+            'adapter, use this parameter to define a "linked" primer '
+            '- see https://cutadapt.readthedocs.io for complete details.'),
+        'cutadapt_front_r': (
+            'Sequence of an adapter ligated to the 5\' end. The '
+            'adapter and any preceding bases are trimmed. Partial '
+            'matches at the 5\' end are allowed. If a `^` character '
+            'is prepended, the adapter is only found if it is at the '
+            'beginning of the read. Search in reverse read.'),
+        'cutadapt_anywhere_r': (
+            'Sequence of an adapter that may be ligated to the 5\' '
+            'or 3\' end. Both types of matches as described under '
+            '`adapter` and `front` are allowed. If the first base '
+            'of the read is part of the match, the behavior is as '
+            'with `front`, otherwise as with `adapter`. This '
+            'option is mostly for rescuing failed library '
+            'preparations - do not use if you know which end your '
+            'adapter was ligated to. Search in reverse read.'),
+        'cutadapt_error_rate': 'Maximum allowed error rate.',
+        'cutadapt_indels': 'Allow insertions or deletions of bases when '
+                           'matching adapters.',
+        'cutadapt_times': 'Remove multiple occurrences of an adapter if it is '
+                          'repeated, up to `times` times.',
+        'cutadapt_overlap': 'Require at least `overlap` bases of overlap '
+                            'between read and adapter for an adapter to be '
+                            'found.',
+        'cutadapt_match_read_wildcards': 'Interpret IUPAC wildcards (e.g., N) '
+                                         'in reads.',
+        'cutadapt_match_adapter_wildcards': 'Interpret IUPAC wildcards (e.g., '
+                                            'N) in adapters.',
+        'cutadapt_minimum_length': (
+            'Discard reads shorter than specified value. Note, the cutadapt '
+            'default of 0 has been overridden, because that value produces '
+            'empty sequence records.'),
+        'cutadapt_discard_untrimmed': 'Discard reads in which no adapter was '
+                                      'found.',
+        **{'bowtie2_' + k: v for k, v in
+           filter_parameter_descriptions.items()},
+        **{'bowtie2_' + k: v for k, v in
+           map_paired_reads_parameter_descriptions.items()
+           if k != 'n_threads'},
+        **{'prinseq_' + k: v for k, v in
+           prinseq_parameter_descriptions.items()},
+        **{'samtools_' + k: v for k, v in
+           make_pileup_parameter_descriptions.items()}},
+    output_descriptions={
+        **consensus_sequence_output_descriptions,
+        'filtered_sequences': 'Sequences after filtering with bowtie2.',
+        'clean_sequences': 'Squeaky clean sequences after all QC steps.'},
+    name='Filter, trim, clean, map to reference, and generate consensus.',
+    description=(
+        'This pipeline performs a sequence of quality control steps, followed '
+        'by alignment to a reference genome and generation of a consensus '
+        'alignment. Input sequences are:\n'
+        '1. (optionally) filtered by alignment against a reference database '
+        'with bowtie2.\n'
+        '2. (optionally) trimmed with cutadapt to remove adapter sequences.\n'
+        '3. (optionally) Trimmed with prinseq to remove low-quality '
+        'nucleotides.\n'
+        '4. Aligned to a reference genome with bowtie2, sorted, and '
+        'deduplicated.\n'
+        '5. A consensus alignment is generated using ivar.'),
+    citations=filter_citations + [
+        citations['schmieder_prinseq'], citations['langmead2012fast'],
+        citations['heng2009samtools'], citations['Grubaugh2019ivar']]
+)
+
+plugin.methods.register_function(
+    function=q2_phylogenomics._prinseq.prinseq_single,
+    inputs={'demultiplexed_sequences': SampleData[SequencesWithQuality]},
+    parameters=prinseq_parameters,
+    outputs=[('trimmed_sequences', SampleData[SequencesWithQuality])],
+    input_descriptions=prinseq_input,
+    parameter_descriptions=prinseq_parameter_descriptions,
+    output_descriptions=prinseq_output,
+    name='Filter and trim demultiplexed single-end sequences with PRINSEQ.',
+    description='Filter and trim demultiplexed single-end FASTQ sequences '
+                'based on quality scores using PRINSEQ-lite.',
+    citations=[citations['schmieder_prinseq']]
+)
+
+plugin.methods.register_function(
+    function=q2_phylogenomics._prinseq.prinseq_paired,
+    inputs={
+        'demultiplexed_sequences': SampleData[PairedEndSequencesWithQuality]},
+    parameters=prinseq_parameters,
+    outputs=[('trimmed_sequences', SampleData[PairedEndSequencesWithQuality])],
+    input_descriptions=prinseq_input,
+    parameter_descriptions=prinseq_parameter_descriptions,
+    output_descriptions=prinseq_output,
+    name='Filter and trim demultiplexed paired-end sequences with PRINSEQ.',
+    description='Filter and trim demultiplexed paired-end FASTQ sequences '
+                'based on quality scores using PRINSEQ-lite.',
+    citations=[citations['schmieder_prinseq']]
+)
 
 plugin.methods.register_function(
     function=q2_phylogenomics._filter.filter_single,
@@ -224,34 +415,11 @@ plugin.methods.register_function(
     citations=[citations['langmead2012fast']]
 )
 
-map_paired_reads_input_descriptions = {
-    'demux': 'The demultiplexed sequences to map to the reference.',
-    'database': 'The reference sequence(s).'
-}
-
-map_paired_reads_parameter_descriptions = {
-    'mismatches_per_seed': 'Max mismatches allowed in seed alignment.',
-    'ceil_coefficient': 'Coefficient used to specify the bowtie '
-                        'function L(0,x) for max number of non-A/C/G/T '
-                        'characters allowed in an alignment.',
-    'n_threads': 'Number of alignment threads to launch.',
-    'mapped_only': 'Retain only records for reads that were mapped '
-                   'to the database in the output files.'
-}
-
-map_paired_reads_output_descriptions = {
-    'alignment_maps': 'Results of mapping reads in each input sample '
-                      'to the provided database.'
-}
-
 plugin.methods.register_function(
     function=q2_phylogenomics._assemble.map_paired_reads,
     inputs={'demux': SampleData[PairedEndSequencesWithQuality],
             'database': Bowtie2Index},
-    parameters={'mismatches_per_seed': Int % Range(0, 1, inclusive_end=True),
-                'ceil_coefficient': Float,
-                'n_threads': Int % Range(1, None),
-                'mapped_only': Bool},
+    parameters=map_paired_reads_parameters,
     outputs=[('alignment_maps', SampleData[AlignmentMap])],
     input_descriptions=map_paired_reads_input_descriptions,
     parameter_descriptions=map_paired_reads_parameter_descriptions,
@@ -308,11 +476,6 @@ make_pileup_input_descriptions = {
     'reference': 'The reference sequence'
 }
 
-make_pileup_parameter_descriptions = {
-    'min_mapq': 'The minimum mapQ to consider an alignment.',
-    'max_depth': 'The max per-file depth.'
-}
-
 make_pileup_output_descriptions = {
     'pileups': 'The resulting PileUp data.'
 }
@@ -323,8 +486,7 @@ plugin.methods.register_function(
             # the following should become type ReferenceSequence
             # or somehow be integrated with the Bowtie Index
             'reference': Bowtie2Index},
-    parameters={'min_mapq': Int % Range(0, None),
-                'max_depth': Int % Range(1, None)},
+    parameters=make_pileup_parameters,
     outputs=[('pileups', SampleData[PileUp])],
     input_descriptions=make_pileup_input_descriptions,
     parameter_descriptions=make_pileup_parameter_descriptions,
@@ -338,19 +500,11 @@ consensus_sequence_input_descriptions = {
     'pileups': 'The PileUp data.'
 }
 
-consensus_sequence_output_descriptions = {
-    'table': 'Table describing which consensus sequences are '
-             'observed in each sample.',
-    'consensus_sequences': 'Mapping of consensus sequence identifiers '
-                           'to consensus sequences.'
-}
-
 plugin.methods.register_function(
     function=q2_phylogenomics._assemble.consensus_sequence,
     inputs={'pileups': SampleData[PileUp]},
     parameters={},
-    outputs=[('table', FeatureTable[PresenceAbsence]),
-             ('consensus_sequences', FeatureData[Sequence])],
+    outputs=consensus_sequence_outputs,
     input_descriptions=consensus_sequence_input_descriptions,
     parameter_descriptions={},
     output_descriptions=consensus_sequence_output_descriptions,
