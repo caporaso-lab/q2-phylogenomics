@@ -40,6 +40,10 @@ _pileup_defaults = {
     'max_depth': 300,
 }
 
+_consensus_defaults = {
+    'min_depth': 10
+}
+
 
 def filter_clean_consensus(
         ctx,
@@ -83,6 +87,7 @@ def filter_clean_consensus(
         prinseq_derep=_prinseq_defaults['derep'],
         samtools_min_mapq=_pileup_defaults['min_mapq'],
         samtools_max_depth=_pileup_defaults['max_depth'],
+        consensus_min_depth=_consensus_defaults['min_depth']
         ):
 
     # Quality Control

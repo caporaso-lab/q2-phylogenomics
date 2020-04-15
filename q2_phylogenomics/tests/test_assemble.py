@@ -7,11 +7,14 @@
 # ----------------------------------------------------------------------------
 
 import unittest
+import hashlib
 
 import qiime2
 from qiime2.plugin.testing import TestPluginBase
+import pandas as pd
 
-from q2_phylogenomics._format import SAMFormat, SAMFilesDirFmt
+from q2_phylogenomics._format import (
+    SAMFormat, SAMFilesDirFmt, PileUpFilesDirFmt, PileUpTSVFormat)
 
 
 class TestMapPaired(TestPluginBase):
@@ -28,6 +31,9 @@ class TestMapPaired(TestPluginBase):
             self.get_data_path('sars2-indexed.qza'))
         self.sorted_alignment_maps = qiime2.Artifact.load(
             self.get_data_path('sorted-alignment-maps.qza'))
+        self.pileups = qiime2.Artifact.load(
+            self.get_data_path('pileups.qza')
+        )
 
     def test_map_paired_mapped_only(self):
         obs_art, = self.plugin.methods['map_paired_reads'](
@@ -124,6 +130,122 @@ class TestMapPaired(TestPluginBase):
             # and the other isn't
             self.assertNotIn('NB501727:157:HFWHJBGXF:3:23610:2922:9731',
                              obs_mapped_ids)
+
+    def test_make_pileups(self):
+        obs_art, = self.plugin.methods['make_pileups'](
+            self.sorted_alignment_maps, self.indexed_genome
+        )
+        obs = obs_art.view(PileUpFilesDirFmt)
+        obs_pileups = obs.pileups.iter_views(PileUpTSVFormat)
+        for _, obs_pileup in obs_pileups:
+            obs_df = pd.read_csv(str(obs_pileup), header=None, sep='\t', )
+            # expected values are derived from running samtools
+            # directly on these input files
+            self.assertEqual(obs_df.shape, (345, 6))
+            self.assertEqual(list(obs_df.iloc[:, 0]), ['NC_045512.2'] * 345)
+
+    def test_consensus_sequence_min_depth_1(self):
+        # this min depth value gets actual sequence with the test data
+        obs_table_art, obs_seq_art = self.plugin.methods['consensus_sequence'](
+            self.pileups, min_depth=1,
+        )
+        obs_table = obs_table_art.view(pd.DataFrame)
+
+        # table tests
+        # two different genomes across four samples
+        self.assertEqual(obs_table.shape, (4, 2))
+
+        # expected sample ids
+        self.assertEqual(
+                set(['sample_1', 'sample_2', 'sample_3', 'empty']),
+                set(obs_table.index))
+
+        # expected feature ids
+        seq1_md5 = 'e8b3172acb8547d54deb27e85b596233'  # in samples 1 & 2
+        seq2_md5 = '940f1f1bb24a34601d20afbac3147543'  # in sample 3
+        self.assertEqual(set([seq1_md5, seq2_md5]), set(obs_table.columns))
+
+        # expected total counts
+        self.assertEqual(obs_table.loc['sample_1'].sum(), 1)
+        self.assertEqual(obs_table.loc['sample_2'].sum(), 1)
+        self.assertEqual(obs_table.loc['sample_3'].sum(), 1)
+        self.assertEqual(obs_table.loc['empty'].sum(), 0)
+        self.assertEqual(
+            obs_table.loc[:, seq1_md5].sum(), 2)
+        self.assertEqual(
+            obs_table.loc[:, seq2_md5].sum(), 1)
+
+        self.assertTrue(obs_table[seq1_md5]['sample_1'])
+        self.assertFalse(obs_table[seq2_md5]['sample_1'])
+
+        self.assertTrue(obs_table[seq1_md5]['sample_2'])
+        self.assertFalse(obs_table[seq2_md5]['sample_2'])
+
+        self.assertFalse(obs_table[seq1_md5]['sample_3'])
+        self.assertTrue(obs_table[seq2_md5]['sample_3'])
+
+        self.assertFalse(obs_table[seq1_md5]['empty'])
+        self.assertFalse(obs_table[seq2_md5]['empty'])
+
+        # sequence collection tests
+        self.obs_seq = obs_seq_art.view(pd.Series)
+        self.assertEqual(len(self.obs_seq), 2)
+        # confirm expected sequences by computing their md5 here
+        # and comparing to the expected sequence ids (which were
+        # determined independently)
+        self.assertEqual(
+            hashlib.md5(str(self.obs_seq[seq1_md5]).
+                        encode('utf-8')).hexdigest(),
+            seq1_md5)
+        self.assertEqual(
+            hashlib.md5(str(self.obs_seq[seq2_md5]).
+                        encode('utf-8')).hexdigest(),
+            seq2_md5)
+
+    def test_consensus_sequence_min_depth_default(self):
+        # this min depth value results in sequences that are
+        # 100% N with the test data
+        obs_table_art, obs_seq_art = self.plugin.methods['consensus_sequence'](
+            self.pileups,
+        )
+        obs_table = obs_table_art.view(pd.DataFrame)
+
+        # table tests
+        # one genome across four samples
+        self.assertEqual(obs_table.shape, (4, 1))
+
+        # expected sample ids
+        self.assertEqual(
+                set(['sample_1', 'sample_2', 'sample_3', 'empty']),
+                set(obs_table.index))
+
+        # expected feature ids
+        seq1_md5 = '53b4ce3236e629aebc69f8a2b5abc96b'  # in samples 1-3 (all N)
+        self.assertEqual([seq1_md5], obs_table.columns)
+
+        # expected total counts
+        self.assertEqual(obs_table.loc['sample_1'].sum(), 1)
+        self.assertEqual(obs_table.loc['sample_2'].sum(), 1)
+        self.assertEqual(obs_table.loc['sample_3'].sum(), 1)
+        self.assertEqual(obs_table.loc['empty'].sum(), 0)
+        self.assertEqual(
+            obs_table.loc[:, seq1_md5].sum(), 3)
+
+        self.assertTrue(obs_table[seq1_md5]['sample_1'])
+        self.assertTrue(obs_table[seq1_md5]['sample_2'])
+        self.assertTrue(obs_table[seq1_md5]['sample_3'])
+        self.assertFalse(obs_table[seq1_md5]['empty'])
+
+        # sequence collection tests
+        self.obs_seq = obs_seq_art.view(pd.Series)
+        self.assertEqual(len(self.obs_seq), 1)
+        # confirm expected sequences by computing their md5 here
+        # and comparing to the expected sequence ids (which were
+        # determined independently)
+        self.assertEqual(
+            hashlib.md5(str(self.obs_seq[seq1_md5]).
+                        encode('utf-8')).hexdigest(),
+            seq1_md5)
 
 
 if __name__ == '__main__':

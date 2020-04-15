@@ -179,6 +179,14 @@ filter_description = (
     'exclude_seqs is False) to only keep sequences that do align to the '
     'reference.')
 
+consensus_sequence_parameter_descriptions = {
+    'min_depth': 'The minimum depth to call a consensus base.'
+}
+
+consensus_sequence_parameters = {
+    'min_depth': Int
+}
+
 consensus_sequence_output_descriptions = {
     'table': 'Table describing which consensus sequences are '
              'observed in each sample.',
@@ -199,6 +207,7 @@ make_pileup_parameter_descriptions = {
     'min_mapq': 'The minimum mapQ to consider an alignment.',
     'max_depth': 'The max per-file depth.'
 }
+
 
 plugin.pipelines.register_function(
     function=q2_phylogenomics._pipelines.filter_clean_consensus,
@@ -229,7 +238,9 @@ plugin.pipelines.register_function(
         **{'bowtie2_' + k: v for k, v in map_paired_reads_parameters.items()
            if k != 'n_threads'},
         **{'prinseq_' + k: v for k, v in prinseq_parameters.items()},
-        **{'samtools_' + k: v for k, v in make_pileup_parameters.items()}},
+        **{'samtools_' + k: v for k, v in make_pileup_parameters.items()},
+        **{'consensus_' + k: v for k, v in
+           consensus_sequence_parameters.items()}},
     outputs=consensus_sequence_outputs + [
             ('filtered_sequences', SampleData[PairedEndSequencesWithQuality]),
             ('clean_sequences', SampleData[PairedEndSequencesWithQuality])],
@@ -319,7 +330,9 @@ plugin.pipelines.register_function(
         **{'prinseq_' + k: v for k, v in
            prinseq_parameter_descriptions.items()},
         **{'samtools_' + k: v for k, v in
-           make_pileup_parameter_descriptions.items()}},
+           make_pileup_parameter_descriptions.items()},
+        **{'consensus_' + k: v for k, v in
+           consensus_sequence_parameter_descriptions.items()}},
     output_descriptions={
         **consensus_sequence_output_descriptions,
         'filtered_sequences': 'Sequences after filtering with bowtie2.',
@@ -503,10 +516,10 @@ consensus_sequence_input_descriptions = {
 plugin.methods.register_function(
     function=q2_phylogenomics._assemble.consensus_sequence,
     inputs={'pileups': SampleData[PileUp]},
-    parameters={},
+    parameters=consensus_sequence_parameters,
     outputs=consensus_sequence_outputs,
     input_descriptions=consensus_sequence_input_descriptions,
-    parameter_descriptions={},
+    parameter_descriptions=consensus_sequence_parameter_descriptions,
     output_descriptions=consensus_sequence_output_descriptions,
     name='',
     description='',

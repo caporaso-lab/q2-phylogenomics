@@ -118,25 +118,30 @@ def make_pileups(sorted: BAMFilesDirFmt,
     return result
 
 
-def consensus_sequence(pileups: PileUpFilesDirFmt
+def consensus_sequence(pileups: PileUpFilesDirFmt,
+                       min_depth: int = 10,
                        ) -> (pd.DataFrame, DNASequencesDirectoryFormat):
     features = DNASequencesDirectoryFormat()
     # what's the right way to get this file handle?
     sequences_fp = str(features.path / 'dna-sequences.fasta')
     table_data = {}
-    feature_ids = []
-    sample_ids = []
+    sample_ids = set()
+    feature_ids = set()
     with open(sequences_fp, 'w') as sequences_f, \
             tempfile.TemporaryDirectory() as tmpdirname:
         for path, view in pileups.pileups.iter_views(PileUpTSVFormat):
             ivar_cmd = ['ivar', 'consensus',
                         '-p', 'consensus-genome',
-                        '-n', 'N']
+                        '-n', 'N',
+                        '-m', str(min_depth)]
             run_command(ivar_cmd, cwd=tmpdirname,
                         stdin=open(str(pileups.path / path)))
 
             sample_id = path.stem
-            sample_ids.append(sample_id)
+            if sample_id in table_data:
+                raise ValueError('Sample %s represented by more than one '
+                                 'pileup file.' % sample_id)
+            sample_ids.add(sample_id)
             table_data[sample_id] = []
 
             fasta_fp = os.path.join(tmpdirname, 'consensus-genome.fa')
@@ -150,10 +155,12 @@ def consensus_sequence(pileups: PileUpFilesDirFmt
                 # in other spots in q2?
                 feature_id = hashlib.md5(
                     str(feature).encode('utf-8')).hexdigest()
-                feature_ids.append(feature_id)
                 table_data[sample_id].append(feature_id)
-                feature.metadata['id'] = feature_id
-                feature.write(sequences_f, format='fasta')
+
+                if feature_id not in feature_ids:
+                    feature_ids.add(feature_id)
+                    feature.metadata['id'] = feature_id
+                    feature.write(sequences_f, format='fasta')
 
     # i'm sure there's a better way to do this...
     df = pd.DataFrame(columns=feature_ids, index=sample_ids).fillna(False)
